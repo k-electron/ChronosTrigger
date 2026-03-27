@@ -1,0 +1,5 @@
+{
+  "name": "Chronos Trigger",
+  "description": "A minimalist first-person shooter where time only moves when you do.",
+  "requestFramePermissions": []
+}
