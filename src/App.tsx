@@ -5,7 +5,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Target, Play, RotateCcw, Shield, Zap, Skull } from 'lucide-react';
+import { Target, Play, RotateCcw, Shield, Zap, Skull, Maximize2 } from 'lucide-react';
 
 // --- Types ---
 
@@ -95,10 +95,19 @@ const normalize = (v: Vector) => {
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [gameState, setGameState] = useState<'menu' | 'playing' | 'gameover'>('menu');
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [powerupCount, setPowerupCount] = useState(0);
+  const [isMobile, setIsMobile] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const isPausedRef = useRef(false);
+
+  useEffect(() => {
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
 
   // Game Refs (to avoid React state overhead in loop)
   const playerRef = useRef<Player>({
@@ -119,6 +128,8 @@ export default function App() {
   const particlesRef = useRef<Particle[]>([]);
   const keysRef = useRef<Record<string, boolean>>({});
   const mousePosRef = useRef<Vector>({ x: 0, y: 0 });
+  const activeTouches = useRef<Map<number, { start: Vector, current: Vector, time: number, isJoystick: boolean, hasShot?: boolean }>>(new Map());
+  const joystick = useRef<{ active: boolean, id: number | null, start: Vector, current: Vector }>({ active: false, id: null, start: { x: 0, y: 0 }, current: { x: 0, y: 0 } });
   const lastTimeRef = useRef<number>(0);
   const spawnTimerRef = useRef<number>(0);
   const currentTimeScaleRef = useRef<number>(MIN_TIME_SCALE);
@@ -142,6 +153,8 @@ export default function App() {
     powerupsRef.current = [];
     blastRef.current = { pos: { x: 0, y: 0 }, radius: 0, active: false };
     particlesRef.current = [];
+    activeTouches.current.clear();
+    joystick.current = { active: false, id: null, start: { x: 0, y: 0 }, current: { x: 0, y: 0 } };
     currentTimeScaleRef.current = MIN_TIME_SCALE;
     playerLastShotRef.current = 0;
     setScore(0);
@@ -150,6 +163,62 @@ export default function App() {
     setGameState('playing');
     lastTimeRef.current = performance.now();
   }, []);
+
+  useEffect(() => {
+    const checkMobile = () => {
+      const userAgent = navigator.userAgent || navigator.vendor || (window as any).opera;
+      const isMobileDevice = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent.toLowerCase());
+      setIsMobile(isMobileDevice || (window.innerWidth < 768 && navigator.maxTouchPoints > 0));
+    };
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isFs = !!document.fullscreenElement || !!(document as any).webkitFullscreenElement;
+      setIsFullscreen(isFs);
+      if (isMobile) {
+        if (!isFs) {
+          setIsPaused(true);
+        } else {
+          setIsPaused(false);
+          if (screen.orientation && (screen.orientation as any).lock) {
+            (screen.orientation as any).lock('landscape').catch(console.error);
+          }
+        }
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      const isFs = !!document.fullscreenElement || !!(document as any).webkitFullscreenElement;
+      if (document.hidden) {
+        setIsPaused(true);
+      } else if (!isMobile || isFs) {
+        setIsPaused(false);
+      }
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [isMobile]);
+
+  const requestFullscreen = () => {
+    if (containerRef.current) {
+      if (containerRef.current.requestFullscreen) {
+        containerRef.current.requestFullscreen().catch(console.error);
+      } else if ((containerRef.current as any).webkitRequestFullscreen) {
+        (containerRef.current as any).webkitRequestFullscreen();
+      }
+    }
+  };
 
   const spawnEnemy = useCallback(() => {
     const side = Math.floor(Math.random() * 4);
@@ -214,7 +283,10 @@ export default function App() {
     const dt = (time - lastTimeRef.current) / 1000;
     lastTimeRef.current = time;
 
-    if (gameState !== 'playing') return;
+    if (gameState !== 'playing' || isPausedRef.current) {
+      frameIdRef.current = requestAnimationFrame(update);
+      return;
+    }
 
     // 1. Calculate Player Movement
     const move = { x: 0, y: 0 };
@@ -223,7 +295,29 @@ export default function App() {
     if (keysRef.current['a'] || keysRef.current['ArrowLeft']) move.x -= 1;
     if (keysRef.current['d'] || keysRef.current['ArrowRight']) move.x += 1;
 
-    const normMove = normalize(move);
+    if (joystick.current.active) {
+      const dx = joystick.current.current.x - joystick.current.start.x;
+      const dy = joystick.current.current.y - joystick.current.start.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const maxDist = 50;
+      const normalizedDist = Math.min(dist, maxDist) / maxDist;
+      
+      if (dist > 0) {
+        move.x += (dx / dist) * normalizedDist;
+        move.y += (dy / dist) * normalizedDist;
+      }
+    }
+
+    let normMove = { x: 0, y: 0 };
+    if (move.x !== 0 || move.y !== 0) {
+       const mag = Math.sqrt(move.x * move.x + move.y * move.y);
+       if (mag > 1) {
+         normMove = { x: move.x / mag, y: move.y / mag };
+       } else {
+         normMove = { x: move.x, y: move.y };
+       }
+    }
+
     const player = playerRef.current;
     
     // Instant velocity for target time calculation
@@ -385,13 +479,7 @@ export default function App() {
 
     // Handle Space Blast
     if (keysRef.current[' '] && powerupCountRef.current >= 3 && !blastRef.current.active) {
-      blastRef.current = {
-        pos: { ...player.pos },
-        radius: 0,
-        active: true
-      };
-      powerupCountRef.current = 0;
-      setPowerupCount(0);
+      handleBlast();
     }
 
     draw(timeScale);
@@ -419,6 +507,41 @@ export default function App() {
       
       ctx.globalAlpha = 0.1;
       ctx.fillStyle = '#3b82f6';
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Draw Joystick
+    if (joystick.current.active) {
+      ctx.save();
+      
+      // Base circle
+      ctx.globalAlpha = 0.15;
+      ctx.fillStyle = '#000000';
+      ctx.beginPath();
+      ctx.arc(joystick.current.start.x, joystick.current.start.y, 50, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // Base border
+      ctx.globalAlpha = 0.3;
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(joystick.current.start.x, joystick.current.start.y, 50, 0, Math.PI * 2);
+      ctx.stroke();
+      
+      // Thumb
+      ctx.globalAlpha = 0.4;
+      ctx.fillStyle = '#000000';
+      ctx.beginPath();
+      const dx = joystick.current.current.x - joystick.current.start.x;
+      const dy = joystick.current.current.y - joystick.current.start.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const maxDist = 50;
+      const thumbX = joystick.current.start.x + (dist > 0 ? (dx / dist) * Math.min(dist, maxDist) : 0);
+      const thumbY = joystick.current.start.y + (dist > 0 ? (dy / dist) * Math.min(dist, maxDist) : 0);
+      
+      ctx.arc(thumbX, thumbY, 20, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
     }
@@ -499,7 +622,7 @@ export default function App() {
     ctx.fillText(`TIME: ${(timeScale * 100).toFixed(0)}%`, 20, 30);
   };
 
-  const handleShoot = useCallback(() => {
+  const handleShoot = useCallback((targetPos?: Vector) => {
     if (gameState !== 'playing') return;
     
     const now = performance.now();
@@ -511,7 +634,9 @@ export default function App() {
     if (now - playerLastShotRef.current < currentCooldown) return;
 
     const p = playerRef.current;
-    const toMouse = normalize({ x: mousePosRef.current.x - p.pos.x, y: mousePosRef.current.y - p.pos.y });
+    const target = targetPos || mousePosRef.current;
+    let toMouse = normalize({ x: target.x - p.pos.x, y: target.y - p.pos.y });
+    if (toMouse.x === 0 && toMouse.y === 0) toMouse = { x: 1, y: 0 };
     
     bulletsRef.current.push({
       id: Math.random().toString(36),
@@ -527,17 +652,129 @@ export default function App() {
     playerLastShotRef.current = now;
   }, [gameState]);
 
+  const handleBlast = useCallback(() => {
+    if (powerupCountRef.current >= 3 && !blastRef.current.active) {
+      blastRef.current = {
+        pos: { ...playerRef.current.pos },
+        radius: 0,
+        active: true
+      };
+      powerupCountRef.current = 0;
+      setPowerupCount(0);
+    }
+  }, []);
+
+  const getCanvasPos = (clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    
+    // Handle object-fit: contain scaling
+    const canvasAspect = canvas.width / canvas.height;
+    const rectAspect = rect.width / rect.height;
+    
+    let renderedWidth = rect.width;
+    let renderedHeight = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+    
+    if (canvasAspect > rectAspect) {
+      renderedHeight = rect.width / canvasAspect;
+      offsetY = (rect.height - renderedHeight) / 2;
+    } else {
+      renderedWidth = rect.height * canvasAspect;
+      offsetX = (rect.width - renderedWidth) / 2;
+    }
+    
+    const scaleX = canvas.width / renderedWidth;
+    const scaleY = canvas.height / renderedHeight;
+    
+    return {
+      x: (clientX - rect.left - offsetX) * scaleX,
+      y: (clientY - rect.top - offsetY) * scaleY
+    };
+  };
+
+  const handleTouchStart = useCallback((e: TouchEvent) => {
+    if (gameState !== 'playing') return;
+    e.preventDefault();
+    
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const touch = e.changedTouches[i];
+      const pos = getCanvasPos(touch.clientX, touch.clientY);
+      
+      const isShootTap = joystick.current.active;
+      
+      activeTouches.current.set(touch.identifier, { 
+        start: pos, 
+        current: pos, 
+        time: Date.now(), 
+        isJoystick: false,
+        hasShot: isShootTap
+      });
+      
+      if (isShootTap) {
+        handleShoot(pos);
+      }
+    }
+  }, [gameState, handleShoot]);
+
+  const handleTouchMove = useCallback((e: TouchEvent) => {
+    if (gameState !== 'playing') return;
+    e.preventDefault();
+    
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const touch = e.changedTouches[i];
+      const pos = getCanvasPos(touch.clientX, touch.clientY);
+      const touchData = activeTouches.current.get(touch.identifier);
+      
+      if (touchData) {
+        touchData.current = pos;
+        
+        if (joystick.current.active && joystick.current.id === touch.identifier) {
+          joystick.current.current = pos;
+        } else if (!joystick.current.active && !touchData.hasShot) {
+          const dist = getDistance(touchData.start, pos);
+          if (dist > 15) { // Increased threshold for sloppy taps
+            joystick.current = { active: true, id: touch.identifier, start: touchData.start, current: pos };
+            touchData.isJoystick = true;
+          }
+        }
+      }
+    }
+  }, [gameState]);
+
+  const handleTouchEnd = useCallback((e: TouchEvent) => {
+    if (gameState !== 'playing') return;
+    e.preventDefault();
+    
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const touch = e.changedTouches[i];
+      const touchData = activeTouches.current.get(touch.identifier);
+      
+      if (touchData) {
+        if (joystick.current.id === touch.identifier) {
+          joystick.current.active = false;
+          joystick.current.id = null;
+        } else if (!touchData.isJoystick && !touchData.hasShot) {
+          const dist = getDistance(touchData.start, touchData.current);
+          const time = Date.now() - touchData.time;
+          // Shoot if it was a quick tap without much movement
+          if (dist < 20 && time < 500) {
+             const pos = getCanvasPos(touch.clientX, touch.clientY);
+             handleShoot(pos);
+          }
+        }
+        activeTouches.current.delete(touch.identifier);
+      }
+    }
+  }, [gameState, handleShoot]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => { keysRef.current[e.key.toLowerCase()] = true; };
     const handleKeyUp = (e: KeyboardEvent) => { keysRef.current[e.key.toLowerCase()] = false; };
     const handleMouseMove = (e: MouseEvent) => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
-      mousePosRef.current = {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top
-      };
+      mousePosRef.current = getCanvasPos(e.clientX, e.clientY);
     };
     const handleMouseDown = () => handleShoot();
 
@@ -546,6 +783,14 @@ export default function App() {
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mousedown', handleMouseDown);
 
+    const canvas = canvasRef.current;
+    if (canvas) {
+      canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+      canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+      canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+      canvas.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+    }
+
     frameIdRef.current = requestAnimationFrame(update);
 
     return () => {
@@ -553,9 +798,15 @@ export default function App() {
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mousedown', handleMouseDown);
+      if (canvas) {
+        canvas.removeEventListener('touchstart', handleTouchStart);
+        canvas.removeEventListener('touchmove', handleTouchMove);
+        canvas.removeEventListener('touchend', handleTouchEnd);
+        canvas.removeEventListener('touchcancel', handleTouchEnd);
+      }
       cancelAnimationFrame(frameIdRef.current);
     };
-  }, [gameState, handleShoot]);
+  }, [gameState, handleShoot, handleTouchStart, handleTouchMove, handleTouchEnd]);
 
   useEffect(() => {
     if (score > highScore) setHighScore(score);
@@ -563,18 +814,21 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center font-sans text-white overflow-hidden p-8">
-      <div className="w-full max-w-[800px] flex flex-col gap-6">
-        {/* HUD (Outside playable area) */}
-        <div className="flex items-center justify-between w-full bg-neutral-900/50 backdrop-blur-md p-4 rounded-xl border border-white/5">
+      <div 
+        ref={containerRef}
+        className={isFullscreen ? "w-screen h-screen bg-black flex items-center justify-center relative" : "w-full max-w-[800px] relative flex flex-col gap-6"}
+      >
+        {/* HUD */}
+        <div className={`w-full ${isMobile ? 'absolute top-0 left-0 p-4 z-10 bg-transparent border-none flex flex-col items-start gap-2 pointer-events-none' : 'bg-neutral-900/50 p-4 rounded-xl border border-white/5 flex items-center justify-between'}`}>
           <div className="flex flex-col">
-            <div className="text-[10px] text-neutral-500 uppercase tracking-widest mb-1">High Score: {highScore}</div>
+            <div className={`text-[10px] ${isMobile ? 'text-white/70' : 'text-neutral-500'} uppercase tracking-widest mb-1`}>High Score: {highScore}</div>
             <div className="flex items-center gap-3">
               <Target className="w-5 h-5 text-red-500" />
-              <span className="text-3xl font-black tabular-nums tracking-tighter">{score}</span>
+              <span className={`text-3xl font-black tabular-nums tracking-tighter ${isMobile ? 'text-white/90 drop-shadow-md' : ''}`}>{score}</span>
             </div>
           </div>
 
-          <div className="flex flex-col items-end gap-2">
+          <div className={`flex ${isMobile ? 'flex-row items-center' : 'flex-col items-end'} gap-2`}>
             <div className="flex gap-1.5">
               {[0, 1, 2].map((i) => (
                 <motion.div
@@ -592,27 +846,45 @@ export default function App() {
               <motion.div 
                 animate={{ opacity: [0.5, 1, 0.5] }}
                 transition={{ repeat: Infinity, duration: 1 }}
-                className="text-[10px] text-amber-400 font-black uppercase tracking-widest"
+                className={`text-[10px] text-amber-400 font-black uppercase tracking-widest ${isMobile ? 'drop-shadow-md' : ''}`}
               >
-                Blast Ready [Space]
+                Blast Ready {isMobile ? '' : '[Space]'}
               </motion.div>
             ) : (
-              <div className="text-[10px] text-neutral-600 font-bold uppercase tracking-widest">
+              <div className={`text-[10px] ${isMobile ? 'text-white/70 drop-shadow-md' : 'text-neutral-600'} font-bold uppercase tracking-widest`}>
                 Collect {3 - powerupCount} more
               </div>
             )}
           </div>
         </div>
 
-        <div className="relative">
+        <div className="relative w-full h-full flex items-center justify-center">
           {/* Game Canvas */}
           <canvas
             ref={canvasRef}
             width={CANVAS_WIDTH}
             height={CANVAS_HEIGHT}
-            className="rounded-lg shadow-2xl border border-neutral-800 bg-white cursor-crosshair"
+            className={`shadow-2xl bg-white cursor-crosshair ${isFullscreen ? 'max-w-full max-h-full object-contain' : 'w-full rounded-lg border border-neutral-800'}`}
             id="game-canvas"
           />
+
+          {/* Mobile Blast Button */}
+          {isMobile && gameState === 'playing' && (
+            <button 
+              className="absolute bottom-8 right-8 w-16 h-16 rounded-full bg-amber-500/80 border-2 border-amber-300 text-white flex items-center justify-center shadow-lg active:scale-95 transition-transform z-50 pointer-events-auto"
+              style={{ opacity: powerupCount >= 3 ? 1 : 0.5 }}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleBlast();
+              }}
+              onTouchStart={(e) => {
+                e.stopPropagation();
+                handleBlast();
+              }}
+            >
+              <Shield className="w-8 h-8" />
+            </button>
+          )}
 
           {/* Overlays */}
           <AnimatePresence>
@@ -621,16 +893,16 @@ export default function App() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center rounded-lg"
+                className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center rounded-lg z-40"
               >
                 <motion.h1 
                   initial={{ y: -20 }}
                   animate={{ y: 0 }}
-                  className="text-6xl font-black italic tracking-tighter mb-2 text-white"
+                  className="text-6xl font-black italic tracking-tighter mb-2 text-white text-center"
                 >
                   CHRONOS TRIGGER
                 </motion.h1>
-                <p className="text-neutral-400 mb-8 uppercase tracking-[0.3em] text-sm">Time moves when you move</p>
+                <p className="text-neutral-400 mb-8 uppercase tracking-[0.3em] text-sm text-center">Time moves when you move</p>
                 
                 <button
                   onClick={resetGame}
@@ -650,10 +922,10 @@ export default function App() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="absolute inset-0 bg-red-950/90 backdrop-blur-md flex flex-col items-center justify-center rounded-lg"
+                className="absolute inset-0 bg-red-950/90 backdrop-blur-md flex flex-col items-center justify-center rounded-lg z-40"
               >
                 <Skull className="w-24 h-24 text-red-500 mb-4" />
-                <h2 className="text-5xl font-black italic mb-2 text-white">GAME OVER</h2>
+                <h2 className="text-5xl font-black italic mb-2 text-white text-center">GAME OVER</h2>
                 <div className="text-2xl font-bold mb-8 text-red-200">FINAL SCORE: {score}</div>
                 
                 <button
@@ -663,6 +935,35 @@ export default function App() {
                   <RotateCcw className="w-5 h-5" />
                   Restart
                 </button>
+              </motion.div>
+            )}
+
+            {isMobile && !isFullscreen && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="absolute inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-8 text-center rounded-lg"
+              >
+                <Maximize2 className="w-16 h-16 text-white mb-6 opacity-50" />
+                <h2 className="text-2xl font-bold text-white mb-8">Rotate to Landscape & Play Fullscreen</h2>
+                <button 
+                  onClick={requestFullscreen}
+                  className="px-8 py-4 bg-blue-600 text-white font-black uppercase tracking-widest rounded-lg shadow-lg shadow-blue-500/20 active:scale-95 transition-transform"
+                >
+                  Play Fullscreen
+                </button>
+              </motion.div>
+            )}
+
+            {isPaused && (!isMobile || isFullscreen) && gameState === 'playing' && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="absolute inset-0 bg-black/50 z-40 flex items-center justify-center rounded-lg backdrop-blur-sm"
+              >
+                <h2 className="text-4xl font-black text-white tracking-widest">PAUSED</h2>
               </motion.div>
             )}
           </AnimatePresence>
