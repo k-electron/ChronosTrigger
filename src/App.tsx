@@ -60,8 +60,6 @@ interface Particle extends Entity {
 
 // --- Constants ---
 
-const CANVAS_WIDTH = 800;
-const CANVAS_HEIGHT = 600;
 const PLAYER_RADIUS = 12;
 const ENEMY_RADIUS = 12;
 const POWERUP_RADIUS = 10;
@@ -101,6 +99,10 @@ export default function App() {
   const [highScore, setHighScore] = useState(0);
   const [powerupCount, setPowerupCount] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
+  const [isIOS, setIsIOS] = useState(false);
+  const [isPortrait, setIsPortrait] = useState(false);
+  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
+  const canvasSizeRef = useRef({ width: 800, height: 600 });
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const isPausedRef = useRef(false);
@@ -112,7 +114,7 @@ export default function App() {
   // Game Refs (to avoid React state overhead in loop)
   const playerRef = useRef<Player>({
     id: 'player',
-    pos: { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 },
+    pos: { x: 800 / 2, y: 600 / 2 },
     vel: { x: 0, y: 0 },
     radius: PLAYER_RADIUS,
     color: '#3b82f6', // Blue
@@ -140,7 +142,7 @@ export default function App() {
   const resetGame = useCallback(() => {
     playerRef.current = {
       id: 'player',
-      pos: { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 },
+      pos: { x: canvasSizeRef.current.width / 2, y: canvasSizeRef.current.height / 2 },
       vel: { x: 0, y: 0 },
       radius: PLAYER_RADIUS,
       color: '#3b82f6',
@@ -168,7 +170,24 @@ export default function App() {
     const checkMobile = () => {
       const userAgent = navigator.userAgent || navigator.vendor || (window as any).opera;
       const isMobileDevice = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent.toLowerCase());
-      setIsMobile(isMobileDevice || (window.innerWidth < 768 && navigator.maxTouchPoints > 0));
+      const isMobileResult = isMobileDevice || (window.innerWidth < 768 && navigator.maxTouchPoints > 0);
+      setIsMobile(isMobileResult);
+      
+      const isIOSDevice = /ipad|iphone|ipod/.test(userAgent.toLowerCase()) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      setIsIOS(isIOSDevice);
+      
+      const portrait = window.innerHeight > window.innerWidth;
+      setIsPortrait(portrait);
+      
+      if (isMobileResult) {
+        const newSize = { width: window.innerWidth, height: window.innerHeight };
+        setCanvasSize(newSize);
+        canvasSizeRef.current = newSize;
+      } else {
+        const newSize = { width: 800, height: 600 };
+        setCanvasSize(newSize);
+        canvasSizeRef.current = newSize;
+      }
     };
     checkMobile();
     window.addEventListener('resize', checkMobile);
@@ -176,10 +195,20 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (isIOS) {
+      if (isPortrait) {
+        setIsPaused(true);
+      } else {
+        setIsPaused(false);
+      }
+    }
+  }, [isIOS, isPortrait]);
+
+  useEffect(() => {
     const handleFullscreenChange = () => {
       const isFs = !!document.fullscreenElement || !!(document as any).webkitFullscreenElement;
       setIsFullscreen(isFs);
-      if (isMobile) {
+      if (isMobile && !isIOS) {
         if (!isFs) {
           setIsPaused(true);
         } else {
@@ -195,7 +224,7 @@ export default function App() {
       const isFs = !!document.fullscreenElement || !!(document as any).webkitFullscreenElement;
       if (document.hidden) {
         setIsPaused(true);
-      } else if (!isMobile || isFs) {
+      } else if (!isMobile || isFs || (isIOS && !isPortrait)) {
         setIsPaused(false);
       }
     };
@@ -223,10 +252,10 @@ export default function App() {
   const spawnEnemy = useCallback(() => {
     const side = Math.floor(Math.random() * 4);
     let x = 0, y = 0;
-    if (side === 0) { x = Math.random() * CANVAS_WIDTH; y = -50; }
-    else if (side === 1) { x = CANVAS_WIDTH + 50; y = Math.random() * CANVAS_HEIGHT; }
-    else if (side === 2) { x = Math.random() * CANVAS_WIDTH; y = CANVAS_HEIGHT + 50; }
-    else { x = -50; y = Math.random() * CANVAS_HEIGHT; }
+    if (side === 0) { x = Math.random() * canvasSizeRef.current.width; y = -50; }
+    else if (side === 1) { x = canvasSizeRef.current.width + 50; y = Math.random() * canvasSizeRef.current.height; }
+    else if (side === 2) { x = Math.random() * canvasSizeRef.current.width; y = canvasSizeRef.current.height + 50; }
+    else { x = -50; y = Math.random() * canvasSizeRef.current.height; }
 
     const isSuper = Math.random() < SUPER_ENEMY_CHANCE;
     const types: Enemy['type'][] = ['grunt', 'sniper', 'charger'];
@@ -250,8 +279,8 @@ export default function App() {
   }, []);
 
   const spawnPowerup = useCallback(() => {
-    const x = Math.random() * (CANVAS_WIDTH - 100) + 50;
-    const y = Math.random() * (CANVAS_HEIGHT - 100) + 50;
+    const x = Math.random() * (canvasSizeRef.current.width - 100) + 50;
+    const y = Math.random() * (canvasSizeRef.current.height - 100) + 50;
     powerupsRef.current.push({
       id: Math.random().toString(36),
       pos: { x, y },
@@ -342,8 +371,8 @@ export default function App() {
     player.pos.y += currentVel.y * dt;
 
     // Bound player
-    player.pos.x = Math.max(player.radius, Math.min(CANVAS_WIDTH - player.radius, player.pos.x));
-    player.pos.y = Math.max(player.radius, Math.min(CANVAS_HEIGHT - player.radius, player.pos.y));
+    player.pos.x = Math.max(player.radius, Math.min(canvasSizeRef.current.width - player.radius, player.pos.x));
+    player.pos.y = Math.max(player.radius, Math.min(canvasSizeRef.current.height - player.radius, player.pos.y));
 
     // 2. Update World (Scaled by timeScale)
     const worldDt = dt * timeScale;
@@ -494,7 +523,7 @@ export default function App() {
 
     // Clear
     ctx.fillStyle = '#f3f4f6'; // Light gray
-    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    ctx.fillRect(0, 0, canvasSizeRef.current.width, canvasSizeRef.current.height);
 
     // Draw Blast
     if (blastRef.current.active) {
@@ -813,10 +842,10 @@ export default function App() {
   }, [score, highScore]);
 
   return (
-    <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center font-sans text-white overflow-hidden p-8">
+    <div className="fixed inset-0 bg-neutral-950 flex flex-col items-center justify-center font-sans text-white overflow-hidden">
       <div 
         ref={containerRef}
-        className={isFullscreen ? "w-screen h-screen bg-black flex items-center justify-center relative" : "w-full max-w-[800px] relative flex flex-col gap-6"}
+        className={isFullscreen || isMobile ? "w-full h-full bg-black flex items-center justify-center relative" : "w-full max-w-[800px] relative flex flex-col gap-6 p-8"}
       >
         {/* HUD */}
         <div className={`w-full ${isMobile ? 'absolute top-0 left-0 p-4 z-10 bg-transparent border-none flex flex-col items-start gap-2 pointer-events-none' : 'bg-neutral-900/50 p-4 rounded-xl border border-white/5 flex items-center justify-between'}`}>
@@ -862,9 +891,9 @@ export default function App() {
           {/* Game Canvas */}
           <canvas
             ref={canvasRef}
-            width={CANVAS_WIDTH}
-            height={CANVAS_HEIGHT}
-            className={`shadow-2xl bg-white cursor-crosshair ${isFullscreen ? 'max-w-full max-h-full object-contain' : 'w-full rounded-lg border border-neutral-800'}`}
+            width={canvasSize.width}
+            height={canvasSize.height}
+            className={`shadow-2xl bg-white cursor-crosshair ${isFullscreen || isMobile ? 'max-w-full max-h-full object-contain' : 'w-full rounded-lg border border-neutral-800'}`}
             id="game-canvas"
           />
 
@@ -938,7 +967,7 @@ export default function App() {
               </motion.div>
             )}
 
-            {isMobile && !isFullscreen && (
+            {isMobile && !isFullscreen && !isIOS && (
               <motion.div 
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -953,6 +982,18 @@ export default function App() {
                 >
                   Play Fullscreen
                 </button>
+              </motion.div>
+            )}
+
+            {isIOS && isPortrait && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="absolute inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-8 text-center rounded-lg"
+              >
+                <RotateCcw className="w-16 h-16 text-white mb-6 opacity-50" />
+                <h2 className="text-2xl font-bold text-white mb-8">Please rotate your device to landscape to play</h2>
               </motion.div>
             )}
 
